@@ -6,3 +6,4 @@ authors = ["blabaere <benoit.labaere@gmail.com>"]
 [dependencies]
 mio = "0.3.5"
 log = "0.3.1"
+env_logger = "0.3.1"

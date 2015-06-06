@@ -1,6 +1,6 @@
 extern crate mio;
-#[macro_use]
-extern crate log;
+#[macro_use] extern crate log;
+extern crate env_logger;
 
 mod server;
 
@@ -18,6 +18,9 @@ fn main() {
     if args.len() < 2 {
         return usage()
     }
+
+    env_logger::init().unwrap();
+    info!("Logging initialized.");
 
     match args[1].as_ref() {
         "client" => client(),
