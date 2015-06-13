@@ -15,48 +15,66 @@ const SERVER: Token = Token(0);
 
 struct SimpleClient {
     stream: NonBlock<TcpStream>,
-    token: Option<Token>
+    token: Option<Token>,
+    tx_buffer: Vec<u8>
 }
 
 impl SimpleClient {
 	fn new(stream: NonBlock<TcpStream>) -> SimpleClient {
 		SimpleClient {
 			stream: stream,
-			token: None
+			token: None,
+			tx_buffer: Vec::new()
 		}
 	}
+
+	fn get_stream<'a>(&'a mut self) -> &'a mut NonBlock<::mio::tcp::TcpStream> {
+        &mut self.stream
+    }
 
 	fn try_read_all(&mut self) -> Result<Option<Vec<u8>>, io::Error> {
         let mut result = Vec::with_capacity(2048);
         let mut buffer = &mut [0u8; 2048];
-
-        let stream = &mut self.stream as &mut NonBlock<::mio::tcp::TcpStream>;
+        let stream = self.get_stream();
 
         while let Some(count) = try!(stream.read_slice(buffer)) {
-            result.extend(buffer[..count].iter().map(|x| *x));
+        	if count == 0 {
+        		return Ok(None)
+        	} else {
+        		result.extend(buffer[..count].iter().map(|x| *x));
+        	}
         }
 
         Ok(Some(result))
 	}
 
-	/*fn switch_to_write_state(&mut self, event_loop: &mut EventLoop<SimpleServer>) {
-		let interest = Interest::writable();
+	fn push_msg(&mut self, event_loop: &mut EventLoop<SimpleServer>, buffer: &Vec<u8>) {
+		let interest = Interest::writable() | Interest::hup();
 		let poll_opt = PollOpt::edge();
-		event_loop.reregister(&self.stream, self.token.unwrap(), interest, poll_opt).unwrap();
-	}*/
 
-	/*fn switch_to_read_state(&mut self, event_loop: &mut EventLoop<SimpleServer>) {
-		let interest = Interest::readable();
-		let poll_opt = PollOpt::edge();
-		event_loop.reregister(&self.stream, self.token.unwrap(), interest, poll_opt).unwrap();
-	}*/
+		self.tx_buffer.reserve(buffer.len());
+		self.tx_buffer.extend(buffer.iter().map(|x| *x));
 
-	/*fn on_msg(&mut self, bytes: &[u8]) {
-		match str::from_utf8(bytes) {
-            Ok(text) => info!("SimpleClient::on_msg msg={:?}", text),
-            Err(e) => info!("SimpleClient::on_msg err={:?}", e)
-        }
-	}*/
+		event_loop.reregister(&self.stream, self.token.unwrap(), interest, poll_opt).unwrap();
+	}
+
+	fn try_write_all(&mut self, event_loop: &mut EventLoop<SimpleServer>) -> Result<Option<usize>, io::Error> {
+
+		match try!(self.stream.write_slice(&self.tx_buffer[..])) {
+			Some(0) => Ok(Some(0)),
+			Some(count) => {
+				self.tx_buffer = self.tx_buffer[count..].to_vec();
+
+				if self.tx_buffer.len() == 0 {
+					let interest = Interest::readable() | Interest::hup();
+					let poll_opt = PollOpt::edge();
+					event_loop.reregister(&self.stream, self.token.unwrap(), interest, poll_opt).unwrap();
+				}
+				Ok(Some(count))
+			},
+			None => Ok(None)
+		}
+	}
 }
 
 struct SimpleServer {
@@ -69,7 +87,7 @@ impl SimpleServer {
 		let client_stream = self.listener.accept().unwrap().unwrap();
 		let client = SimpleClient::new(client_stream);
 		let client_token = self.clients.insert(client).ok().unwrap();
-		let client_interest = Interest::readable();
+		let client_interest = Interest::readable() | Interest::hup();
 		let client_poll_opt = PollOpt::edge()/* | PollOpt::oneshot()*/;
 
 		self.get_client(client_token).token = Some(client_token);
@@ -79,14 +97,18 @@ impl SimpleServer {
 		event_loop.register_opt(&self.clients[client_token].stream, client_token, client_interest, client_poll_opt).unwrap();
 	}
 
-	fn readable(&mut self, _: &mut EventLoop<Self>, client_token: Token, _: ReadHint) {
-		info!("SimpleServer::readable {:?}", client_token.as_usize());
+	fn readable(&mut self, event_loop: &mut EventLoop<Self>, client_token: Token, hint: ReadHint) {
+		if hint.is_hup() {
+			self.clients.remove(client_token);
+			return;
+		} 
 
 		match self.try_read_all_from_client(client_token) {
 			Err(e) => {error!("Failed to read from client {:?}: {}", client_token.as_usize(), e)},
 			Ok(None) => {warn!("Read from client {:?} would have blocked", client_token.as_usize())}
 			Ok(Some(buffer)) => if buffer.len() > 0 {
-				info!("Read {} bytes from client {:?}", buffer.len(), client_token.as_usize())
+				info!("Read {} bytes from client {:?}", buffer.len(), client_token.as_usize());
+				self.push_msg_to_clients(event_loop, &buffer);
 			}
 		}
 	}
@@ -95,21 +117,14 @@ impl SimpleServer {
 		self.get_client(client_token).try_read_all()
 	}
 
-	fn writable(&mut self, _: &mut EventLoop<Self>, client_token: Token) {
-		info!("SimpleServer::writable {:?}", client_token.as_usize());
+	fn push_msg_to_clients(&mut self, event_loop: &mut EventLoop<Self>, buffer: &Vec<u8>) {
+		for client in self.clients.iter_mut() {
+			client.push_msg(event_loop, buffer);
+		}
+	}
 
-		//let write_res = self.get_client(client_token).writable(event_loop);
-
-		/*if write_res {
-
-			if true {
-				info!("Everyone was sent the spoken truth ...");
-
-				for client in self.clients.iter_mut() {
-					client.switch_to_read_state(event_loop);
-				}
-			}
-		}*/
+	fn writable(&mut self, event_loop: &mut EventLoop<Self>, client_token: Token) {
+		self.get_client(client_token).try_write_all(event_loop);
 	}
 
     fn get_client<'a>(&'a mut self, token: Token) -> &'a mut SimpleClient {
