@@ -16,6 +16,7 @@ const SERVER: Token = Token(0);
 struct SimpleClient {
     stream: NonBlock<TcpStream>,
     token: Option<Token>,
+    rx_buffer: [u8; 2048],
     tx_buffer: Vec<u8>
 }
 
@@ -24,28 +25,30 @@ impl SimpleClient {
 		SimpleClient {
 			stream: stream,
 			token: None,
+			rx_buffer: [0u8; 2048],
 			tx_buffer: Vec::new()
 		}
 	}
 
-	fn get_stream<'a>(&'a mut self) -> &'a mut NonBlock<::mio::tcp::TcpStream> {
-        &mut self.stream
-    }
-
-	fn try_read_all(&mut self) -> Result<Option<Vec<u8>>, io::Error> {
+	fn pull_msg(&mut self) -> Result<Option<Vec<u8>>, io::Error> {
         let mut result = Vec::with_capacity(2048);
-        let mut buffer = &mut [0u8; 2048];
-        let stream = self.get_stream();
+        //let mut buffer = &mut self.rx_buffer;
+        //let stream = self.get_stream();
 
-        while let Some(count) = try!(stream.read_slice(buffer)) {
+        while let Some(count) = try!(self.read_slice()) {
         	if count == 0 {
         		return Ok(None)
         	} else {
-        		result.extend(buffer[..count].iter().map(|x| *x));
+        		result.extend(self.rx_buffer[..count].iter().map(|x| *x));
         	}
         }
 
         Ok(Some(result))
+	}
+
+	fn read_slice(&mut self) -> Result<Option<usize>, Error> {
+		let stream: &mut NonBlock<::mio::tcp::TcpStream> = &mut self.stream;
+		stream.read_slice(&mut self.rx_buffer)
 	}
 
 	fn push_msg(&mut self, event_loop: &mut EventLoop<SimpleServer>, buffer: &Vec<u8>) {
@@ -58,7 +61,7 @@ impl SimpleClient {
 		event_loop.reregister(&self.stream, self.token.unwrap(), interest, poll_opt).unwrap();
 	}
 
-	fn try_write_all(&mut self, event_loop: &mut EventLoop<SimpleServer>) -> Result<Option<usize>, io::Error> {
+	fn flush_msg(&mut self, event_loop: &mut EventLoop<SimpleServer>) -> Result<Option<usize>, io::Error> {
 
 		match try!(self.stream.write_slice(&self.tx_buffer[..])) {
 			Some(0) => Ok(Some(0)),
@@ -99,22 +102,19 @@ impl SimpleServer {
 
 	fn readable(&mut self, event_loop: &mut EventLoop<Self>, client_token: Token, hint: ReadHint) {
 		if hint.is_hup() {
+			info!("Client {:?} have left", client_token.as_usize());
 			self.clients.remove(client_token);
 			return;
-		} 
+		}
 
-		match self.try_read_all_from_client(client_token) {
+		match self.get_client(client_token).pull_msg() {
 			Err(e) => {error!("Failed to read from client {:?}: {}", client_token.as_usize(), e)},
-			Ok(None) => {warn!("Read from client {:?} would have blocked", client_token.as_usize())}
+			Ok(None) => {warn!("Read from client {:?} would have blocked", client_token.as_usize())},
 			Ok(Some(buffer)) => if buffer.len() > 0 {
 				info!("Read {} bytes from client {:?}", buffer.len(), client_token.as_usize());
 				self.push_msg_to_clients(event_loop, &buffer);
 			}
 		}
-	}
-
-	fn try_read_all_from_client(&mut self, client_token: Token) -> Result<Option<Vec<u8>>, io::Error> {
-		self.get_client(client_token).try_read_all()
 	}
 
 	fn push_msg_to_clients(&mut self, event_loop: &mut EventLoop<Self>, buffer: &Vec<u8>) {
@@ -124,7 +124,12 @@ impl SimpleServer {
 	}
 
 	fn writable(&mut self, event_loop: &mut EventLoop<Self>, client_token: Token) {
-		self.get_client(client_token).try_write_all(event_loop);
+		match self.get_client(client_token).flush_msg(event_loop) {
+			Err(e) => warn!("Failed to send msg to client {:?}: {}", client_token.as_usize(), e),
+			Ok(None) => {warn!("Write to client {:?} would have blocked", client_token.as_usize())},
+			Ok(Some(0)) => {warn!("Write to client {:?} 0 bytes ?!", client_token.as_usize())},
+			_ => {}
+		}
 	}
 
     fn get_client<'a>(&'a mut self, token: Token) -> &'a mut SimpleClient {
@@ -147,7 +152,7 @@ impl Handler for SimpleServer {
 
     fn writable(&mut self, event_loop: &mut EventLoop<Self>, token: Token) {
     	info!("Handler::writable {:?}", token);
- 
+
         match token {
             Token(0) => error!("server received writable notification !"),
             i => self.writable(event_loop, i)
