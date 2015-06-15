@@ -2,7 +2,6 @@
 // https://github.com/dpc/mioco
 // https://github.com/dwrensha/gj
 // https://github.com/calc0000/tcp-loop
-
 use mio::*;
 use mio::tcp::*;
 use mio::util::Slab;
@@ -10,22 +9,26 @@ use std::io;
 use std::io::{Error};
 use std::net::{SocketAddr};
 use std::str;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::ops::DerefMut;
 
 const SERVER: Token = Token(0);
 
 struct SimpleClient {
     stream: NonBlock<TcpStream>,
     token: Option<Token>,
-    rx_buffer: [u8; 2048],
+    //rx_buffer: [u8; 2048], // TODO : find a way to share that buffer accross
+    rx_buffer: Rc<RefCell<[u8; 2048]>>,
     tx_buffer: Vec<u8>
 }
 
 impl SimpleClient {
-	fn new(stream: NonBlock<TcpStream>) -> SimpleClient {
+	fn new(stream: NonBlock<TcpStream>, buffer: Rc<RefCell<[u8; 2048]>>) -> SimpleClient {
 		SimpleClient {
 			stream: stream,
 			token: None,
-			rx_buffer: [0u8; 2048],
+			rx_buffer: buffer,
 			tx_buffer: Vec::new()
 		}
 	}
@@ -39,7 +42,8 @@ impl SimpleClient {
         	if count == 0 {
         		return Ok(None)
         	} else {
-        		result.extend(self.rx_buffer[..count].iter().map(|x| *x));
+        		let buffer = self.rx_buffer.borrow();
+        		result.extend(buffer[..count].iter().map(|x| *x));
         	}
         }
 
@@ -48,7 +52,8 @@ impl SimpleClient {
 
 	fn read_slice(&mut self) -> Result<Option<usize>, Error> {
 		let stream: &mut NonBlock<::mio::tcp::TcpStream> = &mut self.stream;
-		stream.read_slice(&mut self.rx_buffer)
+		let mut buffer = self.rx_buffer.borrow_mut();
+		stream.read_slice(buffer.deref_mut())
 	}
 
 	fn push_msg(&mut self, event_loop: &mut EventLoop<SimpleServer>, buffer: &Vec<u8>) {
@@ -82,13 +87,15 @@ impl SimpleClient {
 
 struct SimpleServer {
 	listener: NonBlock<TcpListener>,
-	clients: Slab<SimpleClient>
+	clients: Slab<SimpleClient>,
+	rx_buffer: Rc<RefCell<[u8; 2048]>>
 }
 
 impl SimpleServer {
 	fn accept(&mut self, event_loop: &mut EventLoop<Self>, _: ReadHint) {
 		let client_stream = self.listener.accept().unwrap().unwrap();
-		let client = SimpleClient::new(client_stream);
+		let rx_buffer = self.rx_buffer.clone();
+		let client = SimpleClient::new(client_stream, rx_buffer);
 		let client_token = self.clients.insert(client).ok().unwrap();
 		let client_interest = Interest::readable() | Interest::hup();
 		let client_poll_opt = PollOpt::edge()/* | PollOpt::oneshot()*/;
@@ -171,6 +178,9 @@ pub fn run() {
     event_loop.register_opt(&listener, SERVER, interest, PollOpt::edge()).unwrap();
 
     let clients = Slab::new_starting_at(Token(1), 128);
-    let mut server = SimpleServer { listener: listener, clients: clients };
+    let mut server = SimpleServer { 
+    	listener: listener, 
+    	clients: clients, 
+    	rx_buffer: Rc::new(RefCell::new([0u8; 2048])) };
     event_loop.run(&mut server).unwrap();
 }
