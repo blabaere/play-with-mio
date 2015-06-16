@@ -18,7 +18,6 @@ const SERVER: Token = Token(0);
 struct SimpleClient {
     stream: NonBlock<TcpStream>,
     token: Option<Token>,
-    //rx_buffer: [u8; 2048], // TODO : find a way to share that buffer accross
     rx_buffer: Rc<RefCell<[u8; 2048]>>,
     tx_buffer: Vec<u8>
 }
@@ -35,14 +34,13 @@ impl SimpleClient {
 
 	fn pull_msg(&mut self) -> Result<Option<Vec<u8>>, io::Error> {
         let mut result = Vec::with_capacity(2048);
-        //let mut buffer = &mut self.rx_buffer;
-        //let stream = self.get_stream();
 
         while let Some(count) = try!(self.read_slice()) {
         	if count == 0 {
         		return Ok(None)
         	} else {
         		let buffer = self.rx_buffer.borrow();
+
         		result.extend(buffer[..count].iter().map(|x| *x));
         	}
         }
@@ -56,7 +54,7 @@ impl SimpleClient {
 		stream.read_slice(buffer.deref_mut())
 	}
 
-	fn push_msg(&mut self, event_loop: &mut EventLoop<SimpleServer>, buffer: &Vec<u8>) {
+	fn push_msg(&mut self, event_loop: &mut EventLoop<SimpleServer>, buffer: &[u8]) {
 		let interest = Interest::writable() | Interest::hup();
 		let poll_opt = PollOpt::edge();
 
@@ -178,9 +176,9 @@ pub fn run() {
     event_loop.register_opt(&listener, SERVER, interest, PollOpt::edge()).unwrap();
 
     let clients = Slab::new_starting_at(Token(1), 128);
-    let mut server = SimpleServer { 
-    	listener: listener, 
-    	clients: clients, 
+    let mut server = SimpleServer {
+    	listener: listener,
+    	clients: clients,
     	rx_buffer: Rc::new(RefCell::new([0u8; 2048])) };
     event_loop.run(&mut server).unwrap();
 }
